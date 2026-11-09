@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="cs"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NEXUS: Signal Foundry</title>
+<style>
+:root{--bg:#0a0d12;--panel:#121821;--line:#1f2a38;--tx:#d8e2ee;--mut:#7a8aa0;--ac:#4cc9f0;--ok:#5ee6a8;--bad:#ff6b6b}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.4 system-ui,sans-serif}
+button,input{font:inherit;color:inherit}button{background:#18222f;border:1px solid var(--line);border-radius:6px;padding:8px 12px;cursor:pointer}
+button:hover:not(:disabled){border-color:var(--ac)}button:disabled{opacity:.4;cursor:not-allowed}
+input{background:#0d131b;border:1px solid var(--line);border-radius:6px;padding:9px;width:100%;margin:5px 0}
+.hide{display:none!important}.mut{color:var(--mut)}
+#auth{max-width:340px;margin:12vh auto;padding:24px;background:var(--panel);border:1px solid var(--line);border-radius:10px}
+#auth h1{margin:0 0 4px;letter-spacing:.12em;font-size:22px}#msg{min-height:20px;color:var(--bad);font-size:13px}
+header{display:flex;flex-wrap:wrap;gap:18px;align-items:center;padding:12px 18px;border-bottom:1px solid var(--line);background:var(--panel)}
+header b{letter-spacing:.12em}header .r{margin-left:auto}
+nav{display:flex;gap:6px;padding:10px 18px}nav button.on{border-color:var(--ac);color:var(--ac)}
+main{padding:0 18px 30px;max-width:980px;margin:auto}
+.row{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;margin:8px 0;background:var(--panel)}
+.row .i{flex:1}.bar{height:6px;background:#0d131b;border-radius:3px;overflow:hidden;margin-top:5px}.bar i{display:block;height:100%;background:var(--ok);transition:width .3s}
+#core{display:block;margin:24px auto;width:170px;height:170px;border-radius:50%;border:2px solid var(--ac);background:radial-gradient(#173246,#0d131b);font-size:18px;box-shadow:0 0 28px #4cc9f033;transition:transform .06s}
+#core:active{transform:scale(.95)}
+.fl{position:fixed;pointer-events:none;color:var(--ac);font-weight:700;animation:up .8s forwards}@keyframes up{to{transform:translateY(-50px);opacity:0}}
+.chain{display:flex;flex-wrap:wrap;align-items:stretch;gap:8px}.node{flex:1;min-width:190px;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+.arrow{align-self:center;color:var(--ac)}
+</style></head><body>
+<div id="auth"><h1>NEXUS</h1><div class="mut">Signal Foundry</div><br>
+<input id="em" type="email" placeholder="E-mail" autocomplete="email"><input id="pw" type="password" placeholder="Heslo (min. 6 znaků)" autocomplete="current-password">
+<div id="msg"></div><button id="li">Přihlásit</button> <button id="su">Registrovat</button> <button id="rs">Zapomenuté heslo</button></div>
+
+<div id="app" class="hide">
+<header><b>NEXUS</b><span>Pulse <b id="p">0</b></span><span>Data <b id="d">0</b></span><span>Research <b id="r">0</b></span><span class="mut">Pulse/s <b id="cps">0</b></span>
+<span class="r"><span class="mut" id="sv">–</span> <button id="lo">Odhlásit</button></span></header>
+<nav><button data-t="play" class="on">Hra</button><button data-t="fac">Továrna</button><button data-t="tech">Výzkum</button></nav>
+<main>
+<section id="t-play"><button id="core">Klik<br><small id="cv"></small></button><div id="units"></div></section>
+<section id="t-fac" class="hide"><p class="mut">Řetězec: Extraktor → Procesor → Laboratoř. Každý stroj spotřebuje vstup z předchozího; nedostatek vstupu snižuje jeho efektivitu (úzké hrdlo).</p><div class="chain" id="chain"></div><p id="tot"></p></section>
+<section id="t-tech" class="hide"><div id="techs"></div></section>
+</main></div>
+
+<script type="module">
+import {createClient} from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
+// Publishable klíč je určen pro prohlížeč (chrání ho RLS). NIKDY sem nedávej sb_secret_ klíč.
+const SB_URL='https://qonpxcgrzvalsggjlcsh.supabase.co', SB_KEY='sb_publishable_YfI1IchV4XEmW0yf9MsjUA_ZuTsJuhf';
+const sb=createClient(SB_URL,SB_KEY);
+const $=s=>document.querySelector(s);
+
+// ---- konfigurace ekonomiky ----
+const UNITS={
+ gen:{n:'Basic Generator',base:15,g:1.15,txt:'+0.5 Pulse/s',cps:.5},
+ ext:{n:'Pulse Extractor',base:120,g:1.17,txt:'+4 Pulse/s (surovina do továrny)',cps:4},
+ proc:{n:'Data Processor',base:600,g:1.18,txt:'2 Pulse/s → 1 Data/s',inP:2,outD:1},
+ lab:{n:'Research Lab',base:2500,g:1.2,txt:'2 Data/s → 1 Research/s',inD:2,outR:1}};
+const TECH={
+ click:{n:'Silnější klik',cost:5,txt:'Klik ×2',req:null},
+ prod:{n:'Přetaktování',cost:15,txt:'Veškerá produkce Pulse ×1.5',req:'click'},
+ eff:{n:'Efektivní recepty',cost:40,txt:'Procesor: 2 Pulse → 1.5 Data',req:'prod'}};
+const fresh=()=>({pulse:0,total:0,data:0,research:0,units:{gen:0,ext:0,proc:0,lab:0},tech:{},cps:0,clicks:0});
+let S=fresh(),ver=0,user=null,dirty=false,saving=false;
+
+const fmt=n=>{if(n<1000)return n.toFixed(n<10?2:0);const s=['K','M','B','T','Qa','Qi'];let i=-1;while(n>=1000&&i<s.length-1){n/=1000;i++}return n.toFixed(2)+s[i]};
+const cost=k=>Math.floor(UNITS[k].base*UNITS[k].g**S.units[k]);
+const clickVal=()=>1*(S.tech.click?2:1);
+const pm=()=>S.tech.prod?1.5:1;
+
+// ---- simulace (dt sekund); sdílená pro online i offline ----
+function step(dt,st=S){
+ const u=st.units,pmul=st.tech.prod?1.5:1;
+ const prod=(u.gen*.5+u.ext*4)*pmul;
+ st.pulse+=prod*dt;st.total+=prod*dt;
+ // procesor: vyžaduje 2*rate Pulse/s na kus
+ const needP=u.proc*2*dt;let effP=needP>0?Math.min(1,st.pulse/needP):0;
+ const usedP=needP*effP;st.pulse-=usedP;st.data+=u.proc*effP*dt*(st.tech.eff?1.5:1);
+ const needD=u.lab*2*dt;let effD=needD>0?Math.min(1,st.data/needD):0;
+ st.data-=needD*effD;st.research+=u.lab*effD*dt;
+ return {prod,effP,effD};
+}
+function cpsNow(){const u=S.units;return (u.gen*.5+u.ext*4)*pm()}
+
+// ---- UI ----
+function render(){
+ $('#p').textContent=fmt(S.pulse);$('#d').textContent=fmt(S.data);$('#r').textContent=fmt(S.research);$('#cps').textContent=fmt(cpsNow());
+ $('#cv').textContent='+'+clickVal()+' Pulse';
+ document.querySelectorAll('[data-b]').forEach(b=>{const k=b.dataset.b;b.disabled=S.pulse<cost(k);b.textContent='Koupit '+fmt(cost(k));b.parentNode.querySelector('.own').textContent='Vlastněno: '+S.units[k]});
+ document.querySelectorAll('[data-tk]').forEach(b=>{const t=TECH[b.dataset.tk],has=S.tech[b.dataset.tk];b.disabled=has||S.research<t.cost||(t.req&&!S.tech[t.req]);b.textContent=has?'Hotovo':t.cost+' Research'});
+ const sim=JSON.parse(JSON.stringify(S));const e=step(1,sim);
+ const pct=x=>Math.round(x*100)+'%';
+ const node=(t,c,eff,extra)=>`<div class="node"><b>${t}</b> ×${c}<div class="mut">${extra}</div><div class="bar"><i style="width:${pct(eff)}"></i></div><small>Efektivita ${pct(eff)}</small></div>`;
+ $('#chain').innerHTML=node('Extraktor + Generátor',S.units.ext+S.units.gen,S.units.ext+S.units.gen?1:0,fmt(cpsNow())+' Pulse/s')+'<span class="arrow">→</span>'+
+  node('Procesor',S.units.proc,e.effP,'Vstup '+fmt(S.units.proc*2)+' Pulse/s')+'<span class="arrow">→</span>'+node('Laboratoř',S.units.lab,e.effD,'Vstup '+fmt(S.units.lab*2)+' Data/s');
+ const w=S.units.lab&&e.effD<.9?(e.effP<.9?'Úzké hrdlo: málo Pulse pro procesory.':'Úzké hrdlo: málo Data pro laboratoře.'):'';
+ $('#tot').textContent=w;
+}
+$('#units').innerHTML=Object.entries(UNITS).map(([k,u])=>`<div class="row"><div class="i"><b>${u.n}</b> <span class="mut">${u.txt}</span><br><small class="own"></small></div><button data-b="${k}"></button></div>`).join('');
+$('#techs').innerHTML=Object.entries(TECH).map(([k,t])=>`<div class="row"><div class="i"><b>${t.n}</b><br><span class="mut">${t.txt}${t.req?' · vyžaduje: '+TECH[t.req].n:''}</span></div><button data-tk="${k}"></button></div>`).join('');
+document.addEventListener('click',e=>{
+ const b=e.target.closest('[data-b]');if(b){const k=b.dataset.b,c=cost(k);if(S.pulse>=c){S.pulse-=c;S.units[k]++;mark();render()}}
+ const t=e.target.closest('[data-tk]');if(t){const k=t.dataset.tk,x=TECH[k];if(S.research>=x.cost&&!S.tech[k]&&(!x.req||S.tech[x.req])){S.research-=x.cost;S.tech[k]=1;mark();render()}}
+ const n=e.target.closest('nav button');if(n){document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x===n));['play','fac','tech'].forEach(i=>$('#t-'+i).classList.toggle('hide',i!==n.dataset.t))}
+});
+$('#core').onclick=e=>{const v=clickVal();S.pulse+=v;S.total+=v;S.clicks++;mark();
+ const f=document.createElement('div');f.className='fl';f.textContent='+'+v;f.style.left=e.clientX+'px';f.style.top=e.clientY+'px';document.body.append(f);setTimeout(()=>f.remove(),800);render()};
+
+// ---- ukládání přes RPC ----
+const mark=()=>{dirty=true};
+async function save(){
+ if(!user||saving||!dirty)return;saving=true;S.cps=cpsNow();
+ const{data,error}=await sb.rpc('save_game',{p_state:S,p_version:ver});
+ saving=false;
+ if(error){$('#sv').textContent=error.message.includes('version_conflict')?'Konflikt verze – obnov stránku':'Chyba uložení';return}
+ ver=data.version;dirty=false;$('#sv').textContent='Uloženo '+new Date().toLocaleTimeString();
+}
+setInterval(save,15000);document.addEventListener('visibilitychange',()=>{if(document.hidden)save()});
+
+async function load(){
+ const{data,error}=await sb.rpc('load_game');
+ if(error){$('#sv').textContent='Chyba načtení: '+error.message;return}
+ S=Object.assign(fresh(),data.state);ver=data.version;
+ // offline: simulace po úsecích s uzavřeným omezením z DB (max 8 h, serverový čas)
+ const off=data.offline_seconds;
+ if(off>30){const before={p:S.pulse,d:S.data,r:S.research},N=400,dt=off/N;for(let i=0;i<N;i++)step(dt);
+  alert(`Offline ${Math.round(off/60)} min:\n+${fmt(S.pulse-before.p)} Pulse, +${fmt(S.data-before.d)} Data, +${fmt(S.research-before.r)} Research`);dirty=true}
+ render();
+}
+let last=performance.now();
+setInterval(()=>{const n=performance.now(),dt=Math.min((n-last)/1000,1);last=n;if(!user)return;step(dt);render()},250);
+
+// ---- autentizace ----
+const msg=t=>$('#msg').textContent=t,cred=()=>({email:$('#em').value.trim(),password:$('#pw').value});
+async function enter(u){user=u;$('#auth').classList.add('hide');$('#app').classList.remove('hide');await load()}
+$('#li').onclick=async()=>{msg('…');const{data,error}=await sb.auth.signInWithPassword(cred());error?msg(error.message):enter(data.user)};
+$('#su').onclick=async()=>{msg('…');const{data,error}=await sb.auth.signUp(cred());if(error)return msg(error.message);data.session?enter(data.user):msg('Zkontroluj e-mail pro potvrzení.')};
+$('#rs').onclick=async()=>{const{error}=await sb.auth.resetPasswordForEmail($('#em').value.trim(),{redirectTo:location.href});msg(error?error.message:'Odkaz pro obnovu odeslán.')};
+$('#lo').onclick=async()=>{await save();await sb.auth.signOut();location.reload()};
+sb.auth.getSession().then(({data})=>{if(data.session)enter(data.session.user)});
+</script></body></html>
