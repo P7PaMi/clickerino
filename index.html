@@ -29,12 +29,12 @@ main{padding:0 18px 30px;max-width:980px;margin:auto}
 <div id="app" class="hide">
 <header><b>NEXUS</b><span>Pulse <b id="p">0</b></span><span>Data <b id="d">0</b></span><span>Research <b id="r">0</b></span><span class="mut">Pulse/s <b id="cps">0</b></span>
 <span class="r"><span class="mut" id="sv">–</span> <button id="lo">Odhlásit</button></span></header>
-<nav><button data-t="play" class="on">Hra</button><button data-t="fac">Továrna</button><button data-t="tech">Výzkum</button></nav>
+<nav><button data-t="play" class="on">Hra</button><button data-t="fac">Továrna</button><button data-t="tech">Výzkum</button><button data-t="ach">Úspěchy</button><button data-t="pr">Prestiž</button></nav>
 <main>
-<section id="t-play"><button id="core">Klik<br><small id="cv"></small></button><div id="units"></div></section>
-<section id="t-fac" class="hide"><p class="mut">Řetězec: Extraktor → Procesor → Laboratoř. Každý stroj spotřebuje vstup z předchozího; nedostatek vstupu snižuje jeho efektivitu (úzké hrdlo).</p><div class="chain" id="chain"></div><p id="tot"></p></section>
+<section id="t-play"><button id="core">Klik<br><small id="cv"></small></button><div style="text-align:center"><button id="ov">Overdrive</button></div><div id="units"></div></section>
+<section id="t-fac" class="hide"><p class="mut">Řetězec: Extraktor → Procesor → Laboratoř. Každý stroj spotřebuje vstup z předchozího; nedostatek vstupu snižuje jeho efektivitu (úzké hrdlo).</p><div class="row"><div class="i"><b>Distributor</b> <span class="mut">podíl proudu Pulse směřující do procesorů; zbytek zůstává jako Pulse k nákupům</span><br><input id="sh" type="range" min="0" max="100" value="100"></div><b id="shv">100%</b></div><div class="chain" id="chain"></div><p id="tot"></p></section>
 <section id="t-tech" class="hide"><div id="techs"></div></section>
-</main></div>
+<section id="t-ach" class="hide"><p class="mut">Každý úspěch: +2 % produkce.</p><div id="achs"></div><h3>Výzvy</h3><div id="chs"></div></section><section id="t-pr" class="hide"><div class="row"><div class="i"><b>Prestiž</b><br><span id="prt" class="mut"></span><br><small id="st" class="mut"></small></div><button id="prb">Prestiž</button></div></section></main></div>
 
 <script type="module">
 import {createClient} from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
@@ -48,55 +48,77 @@ const UNITS={
  gen:{n:'Basic Generator',base:15,g:1.15,txt:'+0.5 Pulse/s',cps:.5},
  ext:{n:'Pulse Extractor',base:120,g:1.17,txt:'+4 Pulse/s (surovina do továrny)',cps:4},
  proc:{n:'Data Processor',base:600,g:1.18,txt:'2 Pulse/s → 1 Data/s',inP:2,outD:1},
- lab:{n:'Research Lab',base:2500,g:1.2,txt:'2 Data/s → 1 Research/s',inD:2,outR:1}};
+ lab:{n:'Research Lab',base:2500,g:1.2,txt:'2 Data/s → 1 Research/s',inD:2,outR:1},
+ buf:{n:'Buffer',base:400,g:1.2,txt:'Kapacita +250 Pulse; vyrovnává výkyvy před procesory'}};
 const TECH={
  click:{n:'Silnější klik',cost:5,txt:'Klik ×2',req:null},
  prod:{n:'Přetaktování',cost:15,txt:'Veškerá produkce Pulse ×1.5',req:'click'},
- eff:{n:'Efektivní recepty',cost:40,txt:'Procesor: 2 Pulse → 1.5 Data',req:'prod'}};
-const fresh=()=>({pulse:0,total:0,data:0,research:0,units:{gen:0,ext:0,proc:0,lab:0},tech:{},cps:0,clicks:0});
+ eff:{n:'Efektivní recepty',cost:40,txt:'Procesor: 2 Pulse → 1.5 Data',req:'prod'},
+ logi:{n:'Logistika',cost:25,txt:'Kapacita bufferů ×2',req:'click'},
+ ovd:{n:'Chlazení jádra',cost:30,txt:'Overdrive cooldown 60 s',req:'prod'}};
+const fresh=()=>({pulse:0,total:0,data:0,research:0,units:{gen:0,ext:0,proc:0,lab:0,buf:0},tech:{},cps:0,clicks:0,buf:0,rc:0,chal:{},share:1,legacy:0,ach:{},prestiged:0});
 let S=fresh(),ver=0,user=null,dirty=false,saving=false;
 
 const fmt=n=>{if(n<1000)return n.toFixed(n<10?2:0);const s=['K','M','B','T','Qa','Qi'];let i=-1;while(n>=1000&&i<s.length-1){n/=1000;i++}return n.toFixed(2)+s[i]};
 const cost=k=>Math.floor(UNITS[k].base*UNITS[k].g**S.units[k]);
-const clickVal=()=>1*(S.tech.click?2:1);
-const pm=()=>S.tech.prod?1.5:1;
+const clickVal=()=>(S.tech.click?2:1)*(1+.1*S.legacy);
+let ovd=0,cd=0;const mult=st=>(st.tech.prod?1.5:1)*(1+.1*st.legacy)*(1+.02*Object.keys(st.ach).length)*(performance.now()<ovd?2:1);
 
 // ---- simulace (dt sekund); sdílená pro online i offline ----
 function step(dt,st=S){
- const u=st.units,pmul=st.tech.prod?1.5:1;
+ const u=st.units,pmul=mult(st);
  const prod=(u.gen*.5+u.ext*4)*pmul;
  st.pulse+=prod*dt;st.total+=prod*dt;
  // procesor: vyžaduje 2*rate Pulse/s na kus
- const needP=u.proc*2*dt;let effP=needP>0?Math.min(1,st.pulse/needP):0;
- const usedP=needP*effP;st.pulse-=usedP;st.data+=u.proc*effP*dt*(st.tech.eff?1.5:1);
+ const needP=u.proc*2*dt;const stream=prod*st.share*dt,cap=(u.buf||0)*250*(st.tech.logi?2:1);let effP=needP>0?Math.min(1,(stream+st.buf)/needP):0;
+ const usedP=needP*effP,fs=Math.min(usedP,stream);st.pulse-=fs;st.buf-=usedP-fs;const mv=Math.min(stream-fs,Math.max(0,cap-st.buf),st.pulse);st.pulse-=mv;st.buf+=mv;st.data+=u.proc*effP*dt*(st.tech.eff?1.5:1);
  const needD=u.lab*2*dt;let effD=needD>0?Math.min(1,st.data/needD):0;
  st.data-=needD*effD;st.research+=u.lab*effD*dt;
- return {prod,effP,effD};
+ return {prod,effP,effD,cap};
 }
-function cpsNow(){const u=S.units;return (u.gen*.5+u.ext*4)*pm()}
+function cpsNow(){const u=S.units;return (u.gen*.5+u.ext*4)*mult(S)}
 
+const ACH=[['c100','100 kliků',s=>s.clicks>=100],['t1k','1 K Pulse celkem',s=>s.total>=1e3],['t1m','1 M Pulse celkem',s=>s.total>=1e6],
+['u10','10 strojů',s=>Object.values(s.units).reduce((a,b)=>a+b,0)>=10],['ch','Kompletní řetězec',s=>s.units.ext&&s.units.proc&&s.units.lab],
+['te','Všechny technologie',s=>Object.keys(s.tech).length>=3],['cps','100 Pulse/s',s=>cpsNow()>=100],['lg','První Legacy',s=>s.legacy>=1]];
+let effT=0;
+const CH=[['e90','Udrž efektivitu laboratoře ≥ 90 % po dobu 30 s',10,e=>effT>=30],['bf','Zaplň buffer (kapacita ≥ 1000)',8,e=>e.cap>=1000&&S.buf>=e.cap*.99],['nc','10 K Pulse v jednom běhu bez jediného kliku',15,e=>S.total>=1e4&&S.rc==0]];
+function drawCh(){$('#chs').innerHTML=CH.map(([k,n,r])=>`<div class="row" style="opacity:${S.chal[k]?1:.6}"><div class="i"><b>${S.chal[k]?'✔':'○'} ${n}</b></div><span class="mut">+${r} Research</span></div>`).join('')}
+function checkCh(e){let c=0;for(const[k,n,r,f]of CH)if(!S.chal[k]&&f(e)){S.chal[k]=1;S.research+=r;c++;mark()}if(c)drawCh()}
+const gain=()=>Math.floor(Math.sqrt(S.total/1e5));
+function drawAch(){$('#achs').innerHTML=ACH.map(([k,n])=>`<div class="row" style="opacity:${S.ach[k]?1:.4}"><b>${S.ach[k]?'✔':'○'} ${n}</b></div>`).join('')}
+function checkAch(){let c=0;for(const[k,n,f]of ACH)if(!S.ach[k]&&f(S)){S.ach[k]=1;c++;mark()}if(c)drawAch()}
+$('#ov').onclick=()=>{if(performance.now()<cd)return;ovd=performance.now()+20000;cd=performance.now()+(S.tech.ovd?60000:90000)};
+$('#sh').oninput=e=>{S.share=e.target.value/100;$('#shv').textContent=e.target.value+'%';mark()};
+$('#prb').onclick=()=>{const g=gain();if(g<1||!confirm(`Reset postupu za +${g} Legacy (+${g*10} % produkce trvale)?`))return;
+ S=Object.assign(fresh(),{legacy:S.legacy+g,ach:S.ach,chal:S.chal,clicks:S.clicks,share:S.share,prestiged:1});mark();save();render()};
 // ---- UI ----
 function render(){
  $('#p').textContent=fmt(S.pulse);$('#d').textContent=fmt(S.data);$('#r').textContent=fmt(S.research);$('#cps').textContent=fmt(cpsNow());
  $('#cv').textContent='+'+clickVal()+' Pulse';
  document.querySelectorAll('[data-b]').forEach(b=>{const k=b.dataset.b;b.disabled=S.pulse<cost(k);b.textContent='Koupit '+fmt(cost(k));b.parentNode.querySelector('.own').textContent='Vlastněno: '+S.units[k]});
  document.querySelectorAll('[data-tk]').forEach(b=>{const t=TECH[b.dataset.tk],has=S.tech[b.dataset.tk];b.disabled=has||S.research<t.cost||(t.req&&!S.tech[t.req]);b.textContent=has?'Hotovo':t.cost+' Research'});
+ checkAch();const t=performance.now();$('#ov').disabled=t<cd;$('#ov').textContent=t<ovd?'Overdrive ×2 aktivní':t<cd?'Cooldown '+Math.ceil((cd-t)/1000)+' s':'Overdrive (×2, 20 s)';
+ const g=gain();$('#prt').textContent=`Ztratíš: Pulse, Data, Research, stroje a technologie. Získáš: ${g} Legacy (+10 % produkce za kus). Úspěchy zůstávají.`;$('#prb').disabled=g<1;
+ $('#st').textContent=`Legacy ${S.legacy} · Pulse tento běh ${fmt(S.total)} · kliky ${S.clicks}`;
  const sim=JSON.parse(JSON.stringify(S));const e=step(1,sim);
  const pct=x=>Math.round(x*100)+'%';
  const node=(t,c,eff,extra)=>`<div class="node"><b>${t}</b> ×${c}<div class="mut">${extra}</div><div class="bar"><i style="width:${pct(eff)}"></i></div><small>Efektivita ${pct(eff)}</small></div>`;
  $('#chain').innerHTML=node('Extraktor + Generátor',S.units.ext+S.units.gen,S.units.ext+S.units.gen?1:0,fmt(cpsNow())+' Pulse/s')+'<span class="arrow">→</span>'+
-  node('Procesor',S.units.proc,e.effP,'Vstup '+fmt(S.units.proc*2)+' Pulse/s')+'<span class="arrow">→</span>'+node('Laboratoř',S.units.lab,e.effD,'Vstup '+fmt(S.units.lab*2)+' Data/s');
+  node('Buffer',S.units.buf,e.cap?S.buf/e.cap:0,fmt(S.buf)+' / '+fmt(e.cap))+'<span class="arrow">→</span>'+node('Procesor',S.units.proc,e.effP,'Vstup '+fmt(S.units.proc*2)+' Pulse/s')+'<span class="arrow">→</span>'+node('Laboratoř',S.units.lab,e.effD,'Vstup '+fmt(S.units.lab*2)+' Data/s');
+ effT=S.units.lab&&e.effD>=.9?effT+.25:0;checkCh(e);
  const w=S.units.lab&&e.effD<.9?(e.effP<.9?'Úzké hrdlo: málo Pulse pro procesory.':'Úzké hrdlo: málo Data pro laboratoře.'):'';
  $('#tot').textContent=w;
 }
 $('#units').innerHTML=Object.entries(UNITS).map(([k,u])=>`<div class="row"><div class="i"><b>${u.n}</b> <span class="mut">${u.txt}</span><br><small class="own"></small></div><button data-b="${k}"></button></div>`).join('');
-$('#techs').innerHTML=Object.entries(TECH).map(([k,t])=>`<div class="row"><div class="i"><b>${t.n}</b><br><span class="mut">${t.txt}${t.req?' · vyžaduje: '+TECH[t.req].n:''}</span></div><button data-tk="${k}"></button></div>`).join('');
+const dp=k=>TECH[k].req?1+dp(TECH[k].req):0;
+$('#techs').innerHTML='<div class="chain">'+[0,1,2].map(d=>'<div style="flex:1;min-width:200px">'+Object.entries(TECH).filter(([k])=>dp(k)==d).map(([k,t])=>`<div class="row"><div class="i"><b>${t.n}</b><br><span class="mut">${t.txt}</span></div><button data-tk="${k}"></button></div>`).join('')+'</div>').join('<span class="arrow">→</span>')+'</div>';
 document.addEventListener('click',e=>{
  const b=e.target.closest('[data-b]');if(b){const k=b.dataset.b,c=cost(k);if(S.pulse>=c){S.pulse-=c;S.units[k]++;mark();render()}}
  const t=e.target.closest('[data-tk]');if(t){const k=t.dataset.tk,x=TECH[k];if(S.research>=x.cost&&!S.tech[k]&&(!x.req||S.tech[x.req])){S.research-=x.cost;S.tech[k]=1;mark();render()}}
- const n=e.target.closest('nav button');if(n){document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x===n));['play','fac','tech'].forEach(i=>$('#t-'+i).classList.toggle('hide',i!==n.dataset.t))}
+ const n=e.target.closest('nav button');if(n){document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x===n));['play','fac','tech','ach','pr'].forEach(i=>$('#t-'+i).classList.toggle('hide',i!==n.dataset.t))}
 });
-$('#core').onclick=e=>{const v=clickVal();S.pulse+=v;S.total+=v;S.clicks++;mark();
+$('#core').onclick=e=>{const v=clickVal();S.pulse+=v;S.total+=v;S.clicks++;S.rc++;mark();
  const f=document.createElement('div');f.className='fl';f.textContent='+'+v;f.style.left=e.clientX+'px';f.style.top=e.clientY+'px';document.body.append(f);setTimeout(()=>f.remove(),800);render()};
 
 // ---- ukládání přes RPC ----
@@ -106,14 +128,14 @@ async function save(){
  const{data,error}=await sb.rpc('save_game',{p_state:S,p_version:ver});
  saving=false;
  if(error){$('#sv').textContent=error.message.includes('version_conflict')?'Konflikt verze – obnov stránku':'Chyba uložení';return}
- ver=data.version;dirty=false;$('#sv').textContent='Uloženo '+new Date().toLocaleTimeString();
+ ver=data.version;dirty=false;S.prestiged=0;$('#sv').textContent='Uloženo '+new Date().toLocaleTimeString();
 }
 setInterval(save,15000);document.addEventListener('visibilitychange',()=>{if(document.hidden)save()});
 
 async function load(){
  const{data,error}=await sb.rpc('load_game');
  if(error){$('#sv').textContent='Chyba načtení: '+error.message;return}
- S=Object.assign(fresh(),data.state);ver=data.version;
+ S=Object.assign(fresh(),data.state);S.units=Object.assign(fresh().units,S.units);ver=data.version;drawCh();$('#sh').value=S.share*100;$('#shv').textContent=Math.round(S.share*100)+'%';drawAch();
  // offline: simulace po úsecích s uzavřeným omezením z DB (max 8 h, serverový čas)
  const off=data.offline_seconds;
  if(off>30){const before={p:S.pulse,d:S.data,r:S.research},N=400,dt=off/N;for(let i=0;i<N;i++)step(dt);
